@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PS5 UART Web Interface (Chrome)</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            background-color: #1e1e1e;
+            color: #e0e0e0;
+        }
+        .card {
+            background-color: #2c2c2c;
+            border: 1px solid #444;
+        }
+        .card-title {
+            color: #e0e0e0;
+        }
+        #output {
+            height: 300px;
+            overflow-y: auto;
+            background-color: #252525;
+            color: #e0e0e0;
+            border: 1px solid #444;
+            padding: 15px;
+        }
+        .btn-special {
+            width: 160px;
+            margin: 8px;
+            padding: 10px;
+            background-color: #444;
+            border-color: #555;
+            color: #e0e0e0;
+            font-size: 14px;
+            border-radius: 6px;
+        }
+        .btn-special:hover {
+            background-color: #555;
+            border-color: #666;
+            transform: translateY(-1px);
+        }
+        .btn-special:active {
+            transform: translateY(0);
+        }
+        .special-commands {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            padding: 10px;
+        }
+        .status-bar {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            background-color: #333;
+            color: #e0e0e0;
+            padding: 5px 10px;
+            border-radius: 5px;
+            border: 1px solid #555;
+        }
+        .btn-primary {
+            background-color: #006FCD;
+            border-color: #006FCD;
+        }
+        .btn-primary:hover {
+            background-color: #0057a0;
+            border-color: #0057a0;
+        }
+        .btn-success {
+            background-color: #28a745;
+            border-color: #28a745;
+        }
+        .btn-success:hover {
+            background-color: #218838;
+            border-color: #218838;
+        }
+        .form-select, .form-control {
+            background-color: #333;
+            color: #e0e0e0;
+            border: 1px solid #555;
+        }
+        .form-select:focus, .form-control:focus {
+            background-color: #333;
+            color: #e0e0e0;
+            border-color: #666;
+            box-shadow: 0 0 5px rgba(100, 100, 100, 0.5);
+        }
+        .form-label {
+            color: #e0e0e0;
+        }
+    </style>
+</head>
+<body class="container mt-4">
+    <h1>PS5 UART Web Interface</h1>
+    <div class="card mb-3">
+        <div class="card-body">
+            <h5 class="card-title">Serial Port Settings</h5>
+            <div class="row">
+                <div class="col-md-4">
+                    <label for="baudSelect" class="form-label">Select UART Type:</label>
+                    <select id="baudSelect" class="form-select">
+                        <option value="115200">EMC (Southbridge, 115200)</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <button id="connectBtn" class="btn btn-success mt-4">Connect</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <h5 class="card-title">Command Input</h5>
+            <div class="input-group">
+                <textarea id="commandInput" class="form-control" rows="2" placeholder="Enter command (e.g., status)"></textarea>
+                <button id="sendBtn" class="btn btn-primary">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <h5 class="card-title">Special Commands</h5>
+            <div class="special-commands">
+                <button class="btn btn-secondary btn-special" data-bs-toggle="tooltip" title="Send errlog 0 command" onclick="sendSpecial('latest_error')">Get Latest Error</button>
+                <button class="btn btn-secondary btn-special" data-bs-toggle="tooltip" title="Send errlog 0 to 9 commands" onclick="sendSpecial('last_10_errors')">Get Last 10 Errors</button>
+                <button class="btn btn-secondary btn-special" data-bs-toggle="tooltip" title="Send errlog clear command" onclick="sendSpecial('clear_error_logs')">Clear Error Logs</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <h5 class="card-title">UART Output</h5>
+            <div id="output" class="border p-3"></div>
+        </div>
+    </div>
+
+    <div class="status-bar" id="statusBar"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Enable tooltips
+        document.addEventListener('DOMContentLoaded', () => {
+            const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+            tooltipTriggerList.forEach(tooltipTriggerEl => new bootstrap.Tooltip(tooltipTriggerEl));
+        });
+
+        let port = null;
+        let reader = null;
+        let writer = null;
+
+        function appendOutput(message) {
+            const output = document.getElementById("output");
+            output.innerHTML += message + "<br>";
+            output.scrollTop = output.scrollHeight;
+        }
+
+        function showStatus(message) {
+            const statusBar = document.getElementById("statusBar");
+            statusBar.textContent = message;
+            setTimeout(() => { statusBar.textContent = ""; }, 5000);
+        }
+
+        function calculateChecksum(command) {
+            const advertisement = 256;
+            const checksum = Array.from(command).reduce((sum, char) => sum + char.charCodeAt(0), 0) + advertisement;
+            return (checksum % advertisement).toString(16).padStart(2, '0').toUpperCase();
+        }
+
+        async function connectSerial() {
+            const connectBtn = document.getElementById("connectBtn");
+            if (connectBtn.textContent === "Connect") {
+                try {
+                    port = await navigator.serial.requestPort();
+                    const baudrate = parseInt(document.getElementById("baudSelect").value);
+                    await port.open({ baudRate: baudrate });
+                    writer = port.writable.getWriter();
+                    reader = port.readable.getReader();
+                    connectBtn.textContent = "Disconnect";
+                    appendOutput(`<span style="color: green;">Connected to serial port at ${baudrate} baud</span>`);
+                    showStatus(`Connected to serial port at ${baudrate} baud`);
+                    readSerial();
+                } catch (e) {
+                    appendOutput(`<span style="color: red;">Serial Error: ${e}</span>`);
+                    showStatus("Error connecting to serial port");
+                }
+            } else {
+                await disconnectSerial();
+            }
+        }
+
+        async function disconnectSerial() {
+            if (reader) {
+                reader.cancel();
+                reader = null;
+            }
+            if (writer) {
+                writer.releaseLock();
+                writer = null;
+            }
+            if (port) {
+                await port.close();
+                port = null;
+            }
+            document.getElementById("connectBtn").textContent = "Connect";
+            appendOutput(`<span style="color: white;">Disconnected from serial port</span>`);
+            showStatus("Disconnected from serial port");
+        }
+
+        async function readSerial() {
+            while (port && reader) {
+                try {
+                    const { value, done } = await reader.read();
+                    if (done) {
+                        appendOutput(`<span style="color: white;">Serial port closed</span>`);
+                        break;
+                    }
+                    const decoded = new TextDecoder().decode(value).trim();
+                    if (decoded) {
+                        appendOutput(`<span style="color: magenta;">> ${decoded}</span>`);
+                    }
+                } catch (e) {
+                    appendOutput(`<span style="color: red;">Serial Error: ${e}</span>`);
+                    showStatus("Serial error occurred");
+                    await disconnectSerial();
+                    break;
+                }
+            }
+        }
+
+        async function sendCommand(command) {
+            if (!port || !writer) {
+                appendOutput(`<span style="color: red;">No serial port connected</span>`);
+                showStatus("No serial port connected");
+                return;
+            }
+            try {
+                const checksum = calculateChecksum(command);
+                const fullCommand = `${command}:${checksum}\r\n`;
+                const data = new TextEncoder().encode(fullCommand);
+                await writer.write(data);
+                appendOutput(`<span style="color: cyan;">--> ${command}</span>`);
+            } catch (e) {
+                appendOutput(`<span style="color: red;">Failed to send command: ${e}</span>`);
+                showStatus("Error sending command");
+            }
+        }
+
+        async function sendSpecial(action) {
+            if (!port || !writer) {
+                appendOutput(`<span style="color: red;">No serial port connected</span>`);
+                showStatus("No serial port connected");
+                return;
+            }
+            try {
+                switch (action) {
+                    case "latest_error":
+                        await sendCommand("errlog 0");
+                        showStatus("Requested latest error");
+                        break;
+                    case "last_10_errors":
+                        for (let i = 0; i < 10; i++) {
+                            await sendCommand(`errlog ${i}`);
+                            await new Promise(resolve => setTimeout(resolve, 100));
+                        }
+                        showStatus("Requested last 10 errors");
+                        break;
+                    case "clear_error_logs":
+                        await sendCommand("errlog clear");
+                        showStatus("Cleared error logs");
+                        break;
+                }
+            } catch (e) {
+                appendOutput(`<span style="color: red;">Error: ${e}</span>`);
+                showStatus("Error performing action");
+            }
+        }
+
+        document.getElementById("connectBtn").onclick = connectSerial;
+
+        document.getElementById("sendBtn").onclick = async () => {
+            const command = document.getElementById("commandInput").value.trim().toLowerCase();
+            if (!command) return;
+            if (command === "exit") {
+                await disconnectSerial();
+                return;
+            }
+            await sendCommand(command);
+            document.getElementById("commandInput").value = "";
+        };
+    </script>
+</body>
+</html>
